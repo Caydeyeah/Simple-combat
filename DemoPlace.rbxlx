@@ -1,425 +1,284 @@
 <?xml version='1.0' encoding='utf-8'?>
-<roblox xmlns:xmime="http://www.w3.org/2005/05/xmlmime" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="http://www.roblox.com/roblox.xsd" version="4"><Item class="Workspace"><Properties><string name="Name">Workspace</string></Properties><Item class="Part"><Properties><string name="Name">Baseplate</string><Vector3 name="Size"><X>512</X><Y>16</Y><Z>512</Z></Vector3><Vector3 name="Position"><X>0</X><Y>-8</Y><Z>0</Z></Vector3><bool name="Anchored">true</bool></Properties></Item><Item class="SpawnLocation"><Properties><string name="Name">SpawnLocation</string><Vector3 name="Size"><X>12</X><Y>1</Y><Z>12</Z></Vector3><Vector3 name="Position"><X>0</X><Y>0.5</Y><Z>0</Z></Vector3><bool name="Anchored">true</bool></Properties></Item></Item><Item class="ServerScriptService"><Properties><string name="Name">ServerScriptService</string></Properties><Item class="Script"><Properties><string name="Name">AdvancedCombatEngine</string><ProtectedString name="Source">--!strict
--- ============================================================================
--- ADVANCED COMBAT ENGINE (ACE)
--- A high-fidelity, self-contained server combat framework for Roblox Luau.
--- Features OOP State Tracking, CFrame directional validation, Spatial Hitbox queries,
--- modern Constraint Physics, and dynamic visual effects.
--- ============================================================================
-
-local Players = game:GetService("Players")
+<roblox xmlns:xmime="http://www.w3.org/2005/05/xmlmime" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="http://www.roblox.com/roblox.xsd" version="4"><Item class="Workspace"><Properties><string name="Name">Workspace</string></Properties><Item class="Part"><Properties><string name="Name">Baseplate</string><Vector3 name="Size"><X>512</X><Y>16</Y><Z>512</Z></Vector3><Vector3 name="Position"><X>0</X><Y>-8</Y><Z>0</Z></Vector3><bool name="Anchored">true</bool></Properties></Item><Item class="SpawnLocation"><Properties><string name="Name">SpawnLocation</string><Vector3 name="Size"><X>12</X><Y>1</Y><Z>12</Z></Vector3><Vector3 name="Position"><X>0</X><Y>0.5</Y><Z>0</Z></Vector3><bool name="Anchored">true</bool></Properties></Item></Item><Item class="ServerScriptService"><Properties><string name="Name">ServerScriptService</string></Properties><Item class="Script"><Properties><string name="Name">ServerCombat</string><ProtectedString name="Source">local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local TweenService = game:GetService("TweenService")
 local Debris = game:GetService("Debris")
-local RunService = game:GetService("RunService")
-local StarterPack = game:GetService("StarterPack")
 
--- // SYSTEM CONFIGURATION // --
-local CONFIG = {
-	-- Combo settings
-	COMBO_MAX = 4,
-	COMBO_RESET_TIME = 1.35, -- Seconds of inactivity before resetting to swing 1
-	COOLDOWN_TIME = 1.85,    -- Cooldown after completing the full combo chain
-	ATTACK_INTERVAL = 0.32, -- Minimum delay allowed between consecutive hits
+local Remotes = Instance.new("Folder")
+Remotes.Name = "CombatRemotes"
+Remotes.Parent = ReplicatedStorage
 
-	-- Spatial Hitbox
-	HITBOX_SIZE = Vector3.new(7, 6.5, 7.5),
-	HITBOX_OFFSET = 3.8,    -- Distance in front of character to center hitbox
-	DIRECTIONAL_THRESHOLD = 0.45, -- Dot product threshold (~126 degree frontal cone)
+local function createRemote(name)
+	local remote = Instance.new("RemoteEvent")
+	remote.Name = name
+	remote.Parent = Remotes
+	return remote
+end
 
-	-- Gameplay Balancing
-	DAMAGE_VALUES = {10, 12, 16, 26},  -- Attack damage per combo step
-	KNOCKBACK_FORCE = {18, 22, 28, 62}, -- Velocity force applied to targets
-	STUN_DURATION = {0.2, 0.2, 0.3, 1.4}, -- Target walkspeed penalty durations
+local RE_Attack = createRemote("Attack")
+local RE_Feedback = createRemote("Feedback")
+local RE_ComboSync = createRemote("ComboSync")
 
-	-- Visual Customization
-	SLASH_COLORS = {
-		Color3.fromRGB(240, 240, 255), -- Swing 1: Ice White
-		Color3.fromRGB(255, 220, 100), -- Swing 2: Amber Yellow
-		Color3.fromRGB(120, 220, 255), -- Swing 3: Electric Blue
-		Color3.fromRGB(255, 60, 60)    -- Swing 4 (Finisher): Crimson Red
+local Config = {
+	HitboxSize = Vector3.new(7, 6, 7.5),
+	HitboxOffset = 4,
+	DotThreshold = 0.5,
+	ComboDamage = {10, 12, 16, 25},
+	KnockbackForce = {18, 22, 28, 55},
+	StunDuration = {0.2, 0.2, 0.3, 1.5},
+	AttackCooldown = 0.3,
+	ComboResetTime = 1.5,
+	MaxCombo = 4,
+	SlashColors = {
+		Color3.fromRGB(255, 255, 255),
+		Color3.fromRGB(255, 215, 0),
+		Color3.fromRGB(0, 191, 255),
+		Color3.fromRGB(255, 50, 50)
 	}
 }
 
--- // COMBAT CLASS DECLARATION // --
-local CombatPlayer = {}
-CombatPlayer.__index = CombatPlayer
+local CombatHandler = {}
+CombatHandler.__index = CombatHandler
 
-type CombatPlayerType = {
-	Player: Player,
-	ComboStep: number,
-	LastAttackTime: number,
-	OnCooldown: boolean,
-	ActiveAttacks: {[Model]: boolean}
-}
-
--- Factory Constructor to instantiate new players into the combat state machine
-function CombatPlayer.new(player: Player): CombatPlayerType
-	local self = setmetatable({}, CombatPlayer) :: any
+function CombatHandler.new(player)
+	local self = setmetatable({}, CombatHandler)
 	self.Player = player
-	self.ComboStep = 1
-	self.LastAttackTime = 0
+	self.Combo = 1
+	self.LastSwing = 0
 	self.OnCooldown = false
-	self.ActiveAttacks = {}
 	return self
 end
 
--- Checks if a player is in a valid state to execute an attack
-function CombatPlayer:CanAttack(): boolean
-	local character = self.Player.Character
-	if not character or not character:FindFirstChild("HumanoidRootPart") then
-		return false
-	end
+function CombatHandler:CanSwing()
+	local char = self.Player.Character
+	if not char then return false end
 	
-	local humanoid = character:FindFirstChildOfClass("Humanoid")
-	if not humanoid or humanoid.Health &lt;= 0 then
-		return false
-	end
+	local hum = char:FindFirstChildOfClass("Humanoid")
+	if not hum or hum.Health &lt;= 0 then return false end
 	
-	local now = os.clock()
-	if self.OnCooldown then
-		return false
-	end
-	
-	if now - self.LastAttackTime &lt; CONFIG.ATTACK_INTERVAL then
-		return false
-	end
+	if self.OnCooldown then return false end
+	if os.clock() - self.LastSwing &lt; Config.AttackCooldown then return false end
 	
 	return true
 end
 
--- Progresses the combo sequence and initiates timers
-function CombatPlayer:TriggerSwing()
-	local now = os.clock()
+local function spawnVFX(cf, step)
+	local vfx = Instance.new("Part")
+	vfx.Anchored = true
+	vfx.CanCollide = false
+	vfx.CastShadow = false
+	vfx.Material = Enum.Material.Neon
+	vfx.Color = Config.SlashColors[step]
+	vfx.Size = Vector3.new(0.1, 0.1, 0.1)
+	vfx.CFrame = cf * CFrame.Angles(0, 0, math.rad(math.random(-15, 15)))
+	vfx.Parent = workspace
 	
-	-- Reset combo to 1 if the player waited too long between swings
-	if now - self.LastAttackTime &gt; CONFIG.COMBO_RESET_TIME then
-		self.ComboStep = 1
-	end
+	local targetSize = Vector3.new(Config.HitboxSize.X, 0.1, 2.5)
+	local tweenInfo = TweenInfo.new(0.2, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
 	
-	self.LastAttackTime = now
-	local currentStep = self.ComboStep
-	
-	-- Update state for the next swing
-	if currentStep &gt;= CONFIG.COMBO_MAX then
-		self.OnCooldown = true
-		self.ComboStep = 1
-		task.delay(CONFIG.COOLDOWN_TIME, function()
-			self.OnCooldown = false
-		end)
-	else
-		self.ComboStep = currentStep + 1
-	end
-	
-	-- Execute the combat mechanics for this swing
-	self:ExecuteSwing(currentStep)
-end
-
--- Creates visual slash effects using basic parts and TweenService
-local function createSlashVFX(cframe: CFrame, step: number)
-	local slash = Instance.new("Part")
-	slash.Name = "SlashVFX"
-	slash.Anchored = true
-	slash.CanCollide = false
-	slash.CastShadow = false
-	slash.Material = Enum.Material.Neon
-	slash.Color = CONFIG.SLASH_COLORS[step]
-	slash.Shape = Enum.PartType.Block
-	slash.Transparency = 0.25
-	slash.Size = Vector3.new(0.1, 0.1, 0.1)
-	
-	-- Add visual variation with random roll offsets
-	slash.CFrame = cframe * CFrame.Angles(0, 0, math.rad(math.random(-15, 15)))
-	slash.Parent = workspace
-	
-	local targetSize = Vector3.new(CONFIG.HITBOX_SIZE.X * 0.9, 0.15, 2.5)
-	local tweenInfo = TweenInfo.new(0.22, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
-	
-	local tween = TweenService:Create(slash, tweenInfo, {
+	TweenService:Create(vfx, tweenInfo, {
 		Size = targetSize,
 		Transparency = 1,
-		CFrame = slash.CFrame * CFrame.new(0, 0, -2.2)
-	})
+		CFrame = vfx.CFrame * CFrame.new(0, 0, -2)
+	}):Play()
 	
-	tween:Play()
-	Debris:AddItem(slash, 0.3)
+	Debris:AddItem(vfx, 0.25)
 end
 
--- Dynamic particle burst helper for target impacts
-local function createImpactVFX(position: Vector3, color: Color3)
-	local attachment = Instance.new("Attachment")
-	attachment.Position = position
-	attachment.Parent = workspace.Terrain
+local function spawnHitParticles(pos, color)
+	local att = Instance.new("Attachment")
+	att.Position = pos
+	att.Parent = workspace.Terrain
 	
-	local emitter = Instance.new("ParticleEmitter")
-	emitter.Color = ColorSequence.new(color)
-	emitter.Size = NumberSequence.new({
-		NumberSequenceKeypoint.new(0, 0.65),
+	local particles = Instance.new("ParticleEmitter")
+	particles.Color = ColorSequence.new(color)
+	particles.Size = NumberSequence.new({
+		NumberSequenceKeypoint.new(0, 0.5),
 		NumberSequenceKeypoint.new(1, 0)
 	})
-	emitter.Speed = NumberRange.new(8, 22)
-	emitter.SpreadAngle = Vector2.new(180, 180)
-	emitter.Lifetime = NumberRange.new(0.18, 0.35)
-	emitter.Rate = 0
-	emitter.Parent = attachment
+	particles.Speed = NumberRange.new(10, 20)
+	particles.SpreadAngle = Vector2.new(180, 180)
+	particles.Lifetime = NumberRange.new(0.15, 0.3)
+	particles.Rate = 0
+	particles.Parent = att
 	
-	emitter:Emit(14)
-	Debris:AddItem(attachment, 0.5)
+	particles:Emit(10)
+	Debris:AddItem(att, 0.4)
 end
 
--- Generates 3D floating text above the hit target to represent damage
-local function createDamageText(position: Vector3, amount: number, isFinisher: boolean)
-	local billboard = Instance.new("BillboardGui")
-	billboard.Name = "DamageLabel"
-	billboard.Size = UDim2.fromOffset(80, 25)
-	billboard.StudsOffsetWorldSpace = position + Vector3.new(0, 1.8, 0)
-	billboard.AlwaysOnTop = true
-	billboard.Parent = workspace.Terrain
+local function spawnDamageText(pos, dmg, isFinisher)
+	local gui = Instance.new("BillboardGui")
+	gui.Size = UDim2.fromOffset(80, 25)
+	gui.StudsOffsetWorldSpace = pos + Vector3.new(0, 2, 0)
+	gui.AlwaysOnTop = true
+	gui.Parent = workspace.Terrain
 	
 	local label = Instance.new("TextLabel")
 	label.Size = UDim2.fromScale(1, 1)
 	label.BackgroundTransparency = 1
-	label.Text = tostring(amount)
-	label.TextColor3 = isFinisher and Color3.fromRGB(255, 45, 45) or Color3.fromRGB(255, 255, 255)
+	label.Text = tostring(dmg)
+	label.TextColor3 = isFinisher and Color3.fromRGB(255, 50, 50) or Color3.fromRGB(255, 255, 255)
 	label.Font = Enum.Font.GothamBold
 	label.TextScaled = true
-	label.TextStrokeTransparency = 0.3
-	label.Parent = billboard
+	label.Parent = gui
 	
-	-- Calculate randomized drift arc
-	local driftOffset = Vector3.new(math.random(-2.5, 2.5), 3.5, math.random(-2.5, 2.5))
-	local tweenInfo = TweenInfo.new(0.55, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
+	local drift = Vector3.new(math.random(-2, 2), 3, math.random(-2, 2))
+	local info = TweenInfo.new(0.5, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
 	
-	TweenService:Create(billboard, tweenInfo, {
-		StudsOffsetWorldSpace = billboard.StudsOffsetWorldSpace + driftOffset
-	}):Play()
+	TweenService:Create(gui, info, {StudsOffsetWorldSpace = gui.StudsOffsetWorldSpace + drift}):Play()
+	TweenService:Create(label, info, {TextTransparency = 1}):Play()
 	
-	TweenService:Create(label, tweenInfo, {
-		TextTransparency = 1,
-		TextStrokeTransparency = 1
-	}):Play()
-	
-	Debris:AddItem(billboard, 0.6)
+	Debris:AddItem(gui, 0.55)
 end
 
--- Uses modern constraint physics to knock targets back smoothly
-function CombatPlayer:ApplyKnockback(targetRoot: BasePart, direction: Vector3, force: number)
-	-- Remove old knockback vectors to prevent physics stacking
+function CombatHandler:ApplyKnockback(targetRoot, dir, force)
 	for _, child in ipairs(targetRoot:GetChildren()) do
-		if child.Name == "ACE_Knockback" or child.Name == "ACE_Attachment" then
+		if child.Name == "CombatKB" or child.Name == "CombatAtt" then
 			child:Destroy()
 		end
 	end
 	
-	local attachment = Instance.new("Attachment")
-	attachment.Name = "ACE_Attachment"
-	attachment.Parent = targetRoot
+	local att = Instance.new("Attachment")
+	att.Name = "CombatAtt"
+	att.Parent = targetRoot
 	
-	local linearVelocity = Instance.new("LinearVelocity")
-	linearVelocity.Name = "ACE_Knockback"
-	linearVelocity.Attachment0 = attachment
-	linearVelocity.MaxForce = 185000 -- Overrides target friction and weight
+	local lv = Instance.new("LinearVelocity")
+	lv.Name = "CombatKB"
+	lv.Attachment0 = att
+	lv.MaxForce = 150000
+	lv.VectorVelocity = (dir * force) + Vector3.new(0, force * 0.1, 0)
+	lv.Parent = targetRoot
 	
-	-- Apply movement along the computed vector with a slight upward lift
-	linearVelocity.VectorVelocity = (direction * force) + Vector3.new(0, force * 0.12, 0)
-	linearVelocity.Parent = targetRoot
-	
-	Debris:AddItem(linearVelocity, 0.22)
-	Debris:AddItem(attachment, 0.22)
+	Debris:AddItem(lv, 0.2)
+	Debris:AddItem(att, 0.2)
 end
 
--- Stuns the target by freezing speed and flashing health UI colors
-function CombatPlayer:ApplyStun(targetHumanoid: Humanoid, duration: number)
-	local char = targetHumanoid.Parent
+function CombatHandler:ApplyStun(hum, duration)
+	local char = hum.Parent
 	if not char then return end
 	
-	-- Fire status changes if a custom attribute system is linked
 	char:SetAttribute("Stunned", true)
-	local originalSpeed = targetHumanoid.WalkSpeed
-	targetHumanoid.WalkSpeed = math.max(0, originalSpeed - 12) -- Reduce movement speed
+	local originalSpeed = hum.WalkSpeed
+	hum.WalkSpeed = math.max(0, originalSpeed - 12)
 	
 	task.delay(duration, function()
-		if targetHumanoid and targetHumanoid.Parent then
-			targetHumanoid.WalkSpeed = originalSpeed
+		if hum and hum.Parent then
+			hum.WalkSpeed = originalSpeed
 			char:SetAttribute("Stunned", nil)
 		end
 	end)
 end
 
--- Performs spatial overlap query to find targets inside the frontal box hitbox
-function CombatPlayer:ScanHitbox(root: BasePart, step: number): {Model}
-	local centerCFrame = root.CFrame * CFrame.new(0, 0, -CONFIG.HITBOX_OFFSET)
-	
+function CombatHandler:ScanHitbox(root)
+	local hitboxCF = root.CFrame * CFrame.new(0, 0, -Config.HitboxOffset)
 	local params = OverlapParams.new()
 	params.FilterType = Enum.RaycastFilterType.Exclude
 	params.FilterDescendantsInstances = {self.Player.Character}
-	params.MaxParts = 60
+	params.MaxParts = 50
 	
-	local hits = workspace:GetPartBoundsInBox(centerCFrame, CONFIG.HITBOX_SIZE, params)
-	local scannedModels = {}
-	local validTargets = {}
+	local parts = workspace:GetPartBoundsInBox(hitboxCF, Config.HitboxSize, params)
+	local matched = {}
+	local targets = {}
 	
-	for _, part in ipairs(hits) do
+	for _, part in ipairs(parts) do
 		local model = part:FindFirstAncestorOfClass("Model")
-		if model and not scannedModels[model] then
-			scannedModels[model] = true
+		if model and not matched[model] then
+			matched[model] = true
 			
-			local targetHumanoid = model:FindFirstChildOfClass("Humanoid")
+			local hum = model:FindFirstChildOfClass("Humanoid")
 			local targetRoot = model:FindFirstChild("HumanoidRootPart")
 			
-			if targetHumanoid and targetRoot and targetHumanoid.Health &gt; 0 then
-				-- Calculate direction vector and dot product for directional verification
+			if hum and targetRoot and hum.Health &gt; 0 then
 				local toTarget = (targetRoot.Position - root.Position).Unit
-				local attackerFacing = root.CFrame.LookVector
-				local alignment = toTarget:Dot(attackerFacing)
+				local facing = root.CFrame.LookVector
 				
-				-- Ensure target is within the front angle threshold
-				if alignment &gt;= CONFIG.DIRECTIONAL_THRESHOLD then
-					table.insert(validTargets, model)
+				if toTarget:Dot(facing) &gt;= Config.DotThreshold then
+					table.insert(targets, model)
 				end
 			end
 		end
 	end
 	
-	return validTargets
+	return targets
 end
 
--- Main combat logic flow called per combo step swing
-function CombatPlayer:ExecuteSwing(step: number)
-	local character = self.Player.Character
-	if not character then return end
+function CombatHandler:Swing()
+	local char = self.Player.Character
+	if not char then return end
 	
-	local root = character:FindFirstChild("HumanoidRootPart") :: BasePart
+	local root = char:FindFirstChild("HumanoidRootPart")
 	if not root then return end
 	
-	-- Render local slash VFX
-	local slashCFrame = root.CFrame * CFrame.new(0, 0, -CONFIG.HITBOX_OFFSET + 1)
-	createSlashVFX(slashCFrame, step)
+	local now = os.clock()
+	if now - self.LastSwing &gt; Config.ComboResetTime then
+		self.Combo = 1
+	end
 	
-	-- Capture targets in frontal hitbox
-	local targets = self:ScanHitbox(root, step)
+	self.LastSwing = now
+	local step = self.Combo
 	
+	if step &gt;= Config.MaxCombo then
+		self.OnCooldown = true
+		self.Combo = 1
+		RE_ComboSync:FireClient(self.Player, 1, true)
+		task.delay(2, function()
+			self.OnCooldown = false
+			RE_ComboSync:FireClient(self.Player, 1, false)
+		end)
+	else
+		self.Combo = step + 1
+		RE_ComboSync:FireClient(self.Player, self.Combo, false)
+	end
+	
+	spawnVFX(root.CFrame * CFrame.new(0, 0, -Config.HitboxOffset + 1), step)
+	
+	local targets = self:ScanHitbox(root)
 	for _, target in ipairs(targets) do
-		local targetHumanoid = target:FindFirstChildOfClass("Humanoid")
-		local targetRoot = target:FindFirstChild("HumanoidRootPart") :: BasePart
+		local hum = target:FindFirstChildOfClass("Humanoid")
+		local targetRoot = target:FindFirstChild("HumanoidRootPart")
 		
-		if targetHumanoid and targetRoot then
-			local damage = CONFIG.DAMAGE_VALUES[step]
-			local force = CONFIG.KNOCKBACK_FORCE[step]
-			local stun = CONFIG.STUN_DURATION[step]
+		if hum and targetRoot then
+			local dmg = Config.ComboDamage[step]
+			local force = Config.KnockbackForce[step]
+			local stun = Config.StunDuration[step]
 			
-			-- Inflict damage
-			targetHumanoid:TakeDamage(damage)
+			hum:TakeDamage(dmg)
+			RE_Feedback:FireClient(self.Player, "HitConfirm", step)
 			
-			-- Render visual hit markers
-			createImpactVFX(targetRoot.Position, CONFIG.SLASH_COLORS[step])
-			createDamageText(targetRoot.Position, damage, step == CONFIG.COMBO_MAX)
+			spawnHitParticles(targetRoot.Position, Config.SlashColors[step])
+			spawnDamageText(targetRoot.Position, dmg, step == Config.MaxCombo)
 			
-			-- Apply movement physics
-			local kbDirection = (targetRoot.Position - root.Position).Unit
-			if kbDirection.Magnitude &lt; 0.05 then
-				kbDirection = root.CFrame.LookVector
-			end
-			self:ApplyKnockback(targetRoot, kbDirection, force)
+			local kbDir = (targetRoot.Position - root.Position).Unit
+			if kbDir.Magnitude &lt; 0.01 then kbDir = root.CFrame.LookVector end
 			
-			-- Inflict stun walkspeed debuff
-			self:ApplyStun(targetHumanoid, stun)
+			self:ApplyKnockback(targetRoot, kbDir, force)
+			self:ApplyStun(hum, stun)
 		end
 	end
 end
 
--- // CLIENT LOADER SETUP // --
--- This self-installing local listener monitors inputs and fires activation signals
-local function installClientScript()
-	local localScript = Instance.new("LocalScript")
-	localScript.Name = "ACE_ClientController"
-	
-	localScript.Source = [[
-		local Players = game:GetService("Players")
-		local UIS = game:GetService("UserInputService")
-		local player = Players.LocalPlayer
-		
-		-- Wait for tool instance
-		local tool = script.Parent
-		if not tool:IsA("Tool") then return end
-		
-		-- Setup client activation visual hints
-		tool.Activated:Connect(function()
-			-- In a standard replication setup, local swing animations would trigger here.
-			-- Client side click triggers activation on the tool, which replicates tool.Activated to the server.
-		end)
-	]]
-	
-	return localScript
-end
-
--- // SYSTEM BOOT / INITIALIZATION // --
 local combatRegistry = {}
 
-local function registerPlayer(player: Player)
-	combatRegistry[player] = CombatPlayer.new(player)
+local function registerPlayer(player)
+	combatRegistry[player] = CombatHandler.new(player)
 end
 
-local function removePlayer(player: Player)
+local function removePlayer(player)
 	combatRegistry[player] = nil
 end
 
--- Dynamic weapon creation to put in the player's inventory
-local function createKatanaTool()
-	local tool = Instance.new("Tool")
-	tool.Name = "Combat Katana"
-	tool.RequiresHandle = true
-	tool.ToolTip = "Left Click to execute combos!"
-	
-	local handle = Instance.new("Part")
-	handle.Name = "Handle"
-	handle.Size = Vector3.new(0.4, 0.4, 4.5)
-	handle.Material = Enum.Material.Metal
-	handle.Color = Color3.fromRGB(40, 40, 42)
-	handle.Parent = tool
-	
-	local blade = Instance.new("Part")
-	blade.Name = "Blade"
-	blade.Size = Vector3.new(0.1, 0.35, 4.0)
-	blade.Material = Enum.Material.Neon
-	blade.Color = Color3.fromRGB(240, 240, 255)
-	blade.CanCollide = false
-	blade.CFrame = handle.CFrame * CFrame.new(0, 0, -2.2)
-	blade.Parent = tool
-	
-	local weld = Instance.new("WeldConstraint")
-	weld.Part0 = handle
-	weld.Part1 = blade
-	weld.Parent = handle
-	
-	-- Inject the local controller script
-	local clientCtrl = installClientScript()
-	clientCtrl.Parent = tool
-	
-	return tool
-end
-
--- Setup and verify tool presence in the game assets
-local function initializeStarterWeapon()
-	local toolExists = StarterPack:FindFirstChild("Combat Katana")
-	if not toolExists then
-		local sword = createKatanaTool()
-		sword.Parent = StarterPack
-	end
-end
-
--- Spawns functional test training dummies with floating HP status indicators
-local function spawnTrainingDummy(position: Vector3)
+local function spawnTrainingDummy(pos)
 	local dummy = Instance.new("Model")
 	dummy.Name = "Training Dummy"
 	
-	local humanoid = Instance.new("Humanoid")
-	humanoid.MaxHealth = 300
-	humanoid.Health = 300
-	humanoid.DisplayDistanceType = Enum.HumanoidDisplayDistanceType.None
-	humanoid.Parent = dummy
+	local hum = Instance.new("Humanoid")
+	hum.MaxHealth = 300
+	hum.Health = 300
+	hum.DisplayDistanceType = Enum.HumanoidDisplayDistanceType.None
+	hum.Parent = dummy
 	
-	-- Construct R6 structural body parts
-	local function createPart(name: string, size: Vector3, color: Color3): Part
+	local function createPart(name, size, color)
 		local part = Instance.new("Part")
 		part.Name = name
 		part.Size = size
@@ -440,10 +299,9 @@ local function spawnTrainingDummy(position: Vector3)
 	local lLeg = createPart("Left Leg", Vector3.new(1, 2, 1), Color3.fromRGB(80, 80, 80))
 	
 	dummy.PrimaryPart = hrp
-	hrp.CFrame = CFrame.new(position)
+	hrp.CFrame = CFrame.new(pos)
 	
-	-- Rig connections
-	local jointOffsets = {
+	local welds = {
 		[torso] = CFrame.new(0, 0, 0),
 		[head] = CFrame.new(0, 1.6, 0),
 		[rArm] = CFrame.new(1.5, 0, 0),
@@ -452,7 +310,7 @@ local function spawnTrainingDummy(position: Vector3)
 		[lLeg] = CFrame.new(-0.5, -2, 0)
 	}
 	
-	for part, offset in pairs(jointOffsets) do
+	for part, offset in pairs(welds) do
 		part.CFrame = hrp.CFrame * offset
 		local weld = Instance.new("WeldConstraint")
 		weld.Part0 = hrp
@@ -460,33 +318,32 @@ local function spawnTrainingDummy(position: Vector3)
 		weld.Parent = dummy
 	end
 	
-	-- Create modern glassmorphic status UI billboard
 	local ui = Instance.new("BillboardGui")
-	ui.Name = "StatusBillboard"
-	ui.Size = UDim2.fromOffset(120, 18)
-	ui.StudsOffset = Vector3.new(0, 3.8, 0)
+	ui.Name = "StatusUI"
+	ui.Size = UDim2.fromOffset(100, 16)
+	ui.StudsOffset = Vector3.new(0, 3.5, 0)
 	ui.AlwaysOnTop = true
 	ui.Adornee = hrp
 	ui.Parent = hrp
 	
 	local bg = Instance.new("Frame")
 	bg.Size = UDim2.fromScale(1, 1)
-	bg.BackgroundColor3 = Color3.fromRGB(15, 15, 15)
+	bg.BackgroundColor3 = Color3.fromRGB(20, 20, 20)
 	bg.BorderSizePixel = 0
 	bg.Parent = ui
-	Instance.new("UICorner", bg).CornerRadius = UDim.new(0, 6)
+	Instance.new("UICorner", bg).CornerRadius = UDim.new(0, 5)
 	
 	local barBg = Instance.new("Frame")
-	barBg.Size = UDim2.new(1, -6, 1, -6)
-	barBg.Position = UDim2.new(0, 3, 0, 3)
-	barBg.BackgroundColor3 = Color3.fromRGB(45, 45, 45)
+	barBg.Size = UDim2.new(1, -4, 1, -4)
+	barBg.Position = UDim2.new(0, 2, 0, 2)
+	barBg.BackgroundColor3 = Color3.fromRGB(40, 40, 40)
 	barBg.BorderSizePixel = 0
 	barBg.Parent = bg
 	Instance.new("UICorner", barBg).CornerRadius = UDim.new(0, 4)
 	
 	local barFill = Instance.new("Frame")
 	barFill.Size = UDim2.fromScale(1, 1)
-	barFill.BackgroundColor3 = Color3.fromRGB(70, 210, 100)
+	barFill.BackgroundColor3 = Color3.fromRGB(60, 200, 90)
 	barFill.BorderSizePixel = 0
 	barFill.Parent = barBg
 	Instance.new("UICorner", barFill).CornerRadius = UDim.new(0, 4)
@@ -496,92 +353,243 @@ local function spawnTrainingDummy(position: Vector3)
 	text.BackgroundTransparency = 1
 	text.TextColor3 = Color3.fromRGB(255, 255, 255)
 	text.Font = Enum.Font.GothamBold
-	text.TextSize = 10
-	text.Text = "HP: 300 / 300"
+	text.TextSize = 9
+	text.Text = "HP: 300/300"
 	text.Parent = barBg
 	
-	-- Dynamically updates target status overhead UI
 	local function updateUI()
-		local hpRatio = math.clamp(humanoid.Health / humanoid.MaxHealth, 0, 1)
-		local isStunned = dummy:GetAttribute("Stunned")
+		local ratio = math.clamp(hum.Health / hum.MaxHealth, 0, 1)
+		local stunned = dummy:GetAttribute("Stunned")
 		
-		local targetColor = Color3.fromRGB(70, 210, 100)
-		if isStunned then
-			targetColor = Color3.fromRGB(170, 70, 240) -- Stun Purple
-		elseif hpRatio &lt; 0.35 then
-			targetColor = Color3.fromRGB(230, 65, 65) -- Danger Red
-		elseif hpRatio &lt; 0.65 then
-			targetColor = Color3.fromRGB(240, 180, 50) -- Mid Yellow
+		local color = Color3.fromRGB(60, 200, 90)
+		if stunned then
+			color = Color3.fromRGB(160, 80, 220)
+		elseif ratio &lt; 0.35 then
+			color = Color3.fromRGB(220, 60, 60)
+		elseif ratio &lt; 0.65 then
+			color = Color3.fromRGB(240, 170, 40)
 		end
 		
-		TweenService:Create(barFill, TweenInfo.new(0.12), {
-			Size = UDim2.fromScale(hpRatio, 1),
-			BackgroundColor3 = targetColor
+		TweenService:Create(barFill, TweenInfo.new(0.1), {
+			Size = UDim2.fromScale(ratio, 1),
+			BackgroundColor3 = color
 		}):Play()
 		
-		text.Text = isStunned and "STUNNED" or string.format("HP: %d / %d", math.floor(humanoid.Health), humanoid.MaxHealth)
+		text.Text = stunned and "STUNNED" or string.format("HP: %d/%d", math.floor(hum.Health), hum.MaxHealth)
 	end
 	
-	humanoid:GetPropertyChangedSignal("Health"):Connect(updateUI)
+	hum:GetPropertyChangedSignal("Health"):Connect(updateUI)
 	dummy:GetAttributeChangedSignal("Stunned"):Connect(updateUI)
 	
-	-- Clean respawning trigger
-	humanoid.Died:Connect(function()
-		task.wait(2.2)
+	hum.Died:Connect(function()
+		task.wait(2)
 		dummy:Destroy()
-		spawnTrainingDummy(position)
+		spawnTrainingDummy(pos)
 	end)
 	
 	dummy.Parent = workspace
 end
 
--- Binds player tools to the Combat registry methods
-local function bindCombatTool(tool: Tool, player: Player)
-	tool.Activated:Connect(function()
-		local data = combatRegistry[player]
-		if data and data:CanAttack() then
-			data:TriggerSwing()
-		end
-	end)
-end
-
--- Set up listeners for connections
-Players.PlayerAdded:Connect(function(player)
-	registerPlayer(player)
-	player.CharacterAdded:Connect(function(character)
-		-- Bind tools spawned inside inventory
-		character.ChildAdded:Connect(function(child)
-			if child:IsA("Tool") and child.Name == "Combat Katana" then
-				bindCombatTool(child, player)
-			end
-		end)
-	end)
-	player.Backpack.ChildAdded:Connect(function(child)
-		if child:IsA("Tool") and child.Name == "Combat Katana" then
-			bindCombatTool(child, player)
-		end
-	end)
+RE_Attack.OnServerEvent:Connect(function(player, dir)
+	local handler = combatRegistry[player]
+	if handler and handler:CanSwing() then
+		handler:Swing()
+	end
 end)
 
+Players.PlayerAdded:Connect(registerPlayer)
 Players.PlayerRemoving:Connect(removePlayer)
 
--- Initialize components for active users in case of hot-reloads
-for _, player in ipairs(Players:GetPlayers()) do
-	registerPlayer(player)
-	if player.Character then
-		player.Character.ChildAdded:Connect(function(child)
-			if child:IsA("Tool") and child.Name == "Combat Katana" then
-				bindCombatTool(child, player)
-			end
-		end)
-	end
+for _, p in ipairs(Players:GetPlayers()) do
+	registerPlayer(p)
 end
 
--- Launch initialization tasks
-initializeStarterWeapon()
 spawnTrainingDummy(Vector3.new(0, 3, -15))
 spawnTrainingDummy(Vector3.new(8, 3, -13))
 spawnTrainingDummy(Vector3.new(-8, 3, -13))
+</ProtectedString></Properties></Item></Item><Item class="StarterPlayer"><Properties><string name="Name">StarterPlayer</string></Properties><Item class="StarterPlayerScripts"><Properties><string name="Name">StarterPlayerScripts</string></Properties><Item class="LocalScript"><Properties><string name="Name">LocalCombat</string><ProtectedString name="Source">-- LocalScript -&gt; StarterPlayerScripts
 
-print("[ACE] Advanced Combat Engine initialized successfully.")
-</ProtectedString></Properties></Item></Item></roblox>
+local Players = game:GetService("Players")
+local RS      = game:GetService("ReplicatedStorage")
+local UIS     = game:GetService("UserInputService")
+local TweenS  = game:GetService("TweenService")
+local RunSvc  = game:GetService("RunService")
+
+local player = Players.LocalPlayer
+
+local Remotes      = RS:WaitForChild("CombatRemotes", 10)
+local RE_Attack    = Remotes:WaitForChild("Attack",    10)
+local RE_Fb        = Remotes:WaitForChild("Feedback",  10)
+local RE_Status    = Remotes:WaitForChild("Status",    10)
+local RE_ComboSync = Remotes:WaitForChild("ComboSync", 10)
+
+local COMBO_MAX     = 4
+local COOLDOWN_TIME = 2
+
+-- client doesn't track step itself anymore, the server tells us via ComboSync
+local onCD     = false
+local debounce = false
+
+local gui = Instance.new("ScreenGui")
+gui.Name           = "CombatGui"
+gui.ResetOnSpawn   = false
+gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+gui.Parent         = player:WaitForChild("PlayerGui")
+
+local pipFrame = Instance.new("Frame")
+pipFrame.Size                   = UDim2.new(0, 260, 0, 14)
+pipFrame.Position               = UDim2.new(0.5, -130, 1, -50)
+pipFrame.BackgroundTransparency = 1
+pipFrame.Parent                 = gui
+
+local layout = Instance.new("UIListLayout")
+layout.FillDirection       = Enum.FillDirection.Horizontal
+layout.HorizontalAlignment = Enum.HorizontalAlignment.Center
+layout.Padding             = UDim.new(0, 6)
+layout.Parent              = pipFrame
+
+local cdLabel = Instance.new("TextLabel")
+cdLabel.Size                   = UDim2.new(0, 260, 0, 18)
+cdLabel.Position               = UDim2.new(0.5, -130, 1, -72)
+cdLabel.BackgroundTransparency = 1
+cdLabel.TextColor3             = Color3.fromRGB(220, 70, 70)
+cdLabel.TextScaled             = true
+cdLabel.Font                   = Enum.Font.GothamBold
+cdLabel.Text                   = ""
+cdLabel.Parent                 = gui
+
+local pips = {}
+for i = 1, COMBO_MAX do
+	local p = Instance.new("Frame")
+	p.Size             = UDim2.new(0, 54, 0, 14)
+	p.BackgroundColor3 = Color3.fromRGB(55, 55, 55)
+	p.BorderSizePixel  = 0
+	p.Parent           = pipFrame
+	Instance.new("UICorner", p).CornerRadius = UDim.new(0, 5)
+	pips[i] = p
+end
+
+local function setPips(step, locked)
+	for i, p in ipairs(pips) do
+		local col
+		if locked then
+			col = Color3.fromRGB(180, 40, 40)
+		elseif i &lt; step then
+			col = Color3.fromRGB(255, 200, 50)
+		else
+			col = Color3.fromRGB(55, 55, 55)
+		end
+		TweenS:Create(p, TweenInfo.new(0.1), { BackgroundColor3 = col }):Play()
+	end
+end
+
+local cdConn = nil
+
+local function startCooldownUI()
+	onCD = true
+	if cdConn then cdConn:Disconnect() end
+	local start = tick()
+	cdConn = RunSvc.Heartbeat:Connect(function()
+		local rem = COOLDOWN_TIME - (tick() - start)
+		if rem &lt;= 0 then
+			cdConn:Disconnect()
+			cdConn       = nil
+			cdLabel.Text = ""
+		else
+			cdLabel.Text = string.format("Cooldown  %.1fs", rem)
+		end
+	end)
+end
+
+local function stopCooldownUI()
+	onCD = false
+	if cdConn then
+		cdConn:Disconnect()
+		cdConn = nil
+	end
+	cdLabel.Text = ""
+end
+
+-- server fires this after every swing, on idle reset, and when cooldown starts/ends.
+-- the client used to manage its own step counter but that caused the pips to desync
+-- from what the server actually had, so now we just do whatever the server says.
+RE_ComboSync.OnClientEvent:Connect(function(step, locked)
+	setPips(step, locked)
+	if locked then
+		startCooldownUI()
+	else
+		stopCooldownUI()
+	end
+end)
+
+-- simple roll twitch that gets slightly stronger each hit.
+-- previously the 4th hit used a RenderStepped loop that wrote directly to cam.CFrame
+-- every frame, which fought with roblox's camera system and caused it to zoom out.
+-- tweens are fine because roblox finishes them before applying its own camera logic.
+local function doShake(step)
+	local cam = workspace.CurrentCamera
+	if not cam then return end
+
+	local roll   = math.rad(0.5 + step * 0.35)
+	local origin = cam.CFrame
+
+	TweenS:Create(cam, TweenInfo.new(0.04, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {
+		CFrame = origin * CFrame.Angles(0, 0, roll)
+	}):Play()
+
+	task.delay(0.04, function()
+		TweenS:Create(cam, TweenInfo.new(0.07, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {
+			CFrame = origin
+		}):Play()
+	end)
+end
+
+-- briefly freeze walk speed and animation tracks when a hit lands so it doesn't feel weightless
+local function doHitStop(step)
+	local char = player.Character
+	if not char then return end
+	local hum = char:FindFirstChildOfClass("Humanoid")
+	if not hum then return end
+
+	local pauseTime = (step == 4) and 0.09 or 0.04
+	local origSpeed = hum.WalkSpeed
+	hum.WalkSpeed   = 0
+
+	local animator = hum:FindFirstChildOfClass("Animator")
+	if animator then
+		for _, track in ipairs(animator:GetPlayingAnimationTracks()) do
+			track:AdjustSpeed(0)
+			task.delay(pauseTime, function()
+				if track and track.IsPlaying then track:AdjustSpeed(1) end
+			end)
+		end
+	end
+
+	task.delay(pauseTime, function()
+		if char and char.Parent then hum.WalkSpeed = origSpeed end
+	end)
+end
+
+RE_Fb.OnClientEvent:Connect(function(signal, step)
+	step = step or 1
+	if signal == "HitConfirm" then
+		doShake(step)
+		doHitStop(step)
+	end
+end)
+
+UIS.InputBegan:Connect(function(input, gp)
+	if gp then return end
+	if input.UserInputType ~= Enum.UserInputType.MouseButton1 then return end
+	if onCD or debounce then return end
+
+	local char = player.Character
+	if not char then return end
+	local hrp = char:FindFirstChild("HumanoidRootPart")
+	if not hrp then return end
+
+	debounce = true
+	RE_Attack:FireServer(hrp.CFrame.LookVector)
+	task.delay(0.3, function() debounce = false end)
+end)
+</ProtectedString></Properties></Item></Item></Item></roblox>

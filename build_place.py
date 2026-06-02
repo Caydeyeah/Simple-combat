@@ -48,17 +48,31 @@ def main():
     # ServerScriptService
     sss_item, sss_props = create_item(root, "ServerScriptService", "ServerScriptService")
 
-    # Load and Inject AdvancedCombatEngine.lua
-    script_path = os.path.join(os.path.dirname(__file__), "AdvancedCombatEngine.lua")
-    if os.path.exists(script_path):
-        with open(script_path, "r", encoding="utf-8") as f:
-            source_code = f.read()
-        
-        script_item, script_props = create_item(sss_item, "Script", "AdvancedCombatEngine")
-        add_script_source(script_props, source_code)
-        print("Injected AdvancedCombatEngine.lua source into ServerScriptService.")
+    # StarterPlayer Setup
+    sp_item, sp_props = create_item(root, "StarterPlayer", "StarterPlayer")
+    sps_item, sps_props = create_item(sp_item, "StarterPlayerScripts", "StarterPlayerScripts")
+
+    # Load and Inject ServerCombat.lua
+    server_path = os.path.join(os.path.dirname(__file__), "ServerCombat.lua")
+    if os.path.exists(server_path):
+        with open(server_path, "r", encoding="utf-8") as f:
+            server_source = f.read()
+        script_item, script_props = create_item(sss_item, "Script", "ServerCombat")
+        add_script_source(script_props, server_source)
+        print("Injected ServerCombat.lua source into ServerScriptService.")
     else:
-        print(f"Error: Could not find script at {script_path}")
+        print(f"Error: Could not find script at {server_path}")
+
+    # Load and Inject LocalCombat.lua
+    local_path = os.path.join(os.path.dirname(__file__), "LocalCombat.lua")
+    if os.path.exists(local_path):
+        with open(local_path, "r", encoding="utf-8") as f:
+            local_source = f.read()
+        local_item, local_props = create_item(sps_item, "LocalScript", "LocalCombat")
+        add_script_source(local_props, local_source)
+        print("Injected LocalCombat.lua source into StarterPlayerScripts.")
+    else:
+        print(f"Error: Could not find script at {local_path}")
 
     # Write out the .rbxlx XML place file
     output_path = os.path.join(os.path.dirname(__file__), "DemoPlace.rbxlx")

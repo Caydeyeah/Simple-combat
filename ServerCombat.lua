@@ -1,348 +1,408 @@
--- Script -> ServerScriptService
-
 local Players = game:GetService("Players")
-local RunSvc  = game:GetService("RunService")
-local RS      = game:GetService("ReplicatedStorage")
-local TweenS  = game:GetService("TweenService")
+local RunService = game:GetService("RunService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local TweenService = game:GetService("TweenService")
+local Debris = game:GetService("Debris")
 
-local Remotes      = Instance.new("Folder")
-Remotes.Name       = "CombatRemotes"
-Remotes.Parent     = RS
+local Remotes = Instance.new("Folder")
+Remotes.Name = "CombatRemotes"
+Remotes.Parent = ReplicatedStorage
 
-local function mkRemote(name)
-	local r  = Instance.new("RemoteEvent")
-	r.Name   = name
-	r.Parent = Remotes
-	return r
+local function createRemote(name)
+	local remote = Instance.new("RemoteEvent")
+	remote.Name = name
+	remote.Parent = Remotes
+	return remote
 end
 
-local RE_Attack    = mkRemote("Attack")
-local RE_Fb        = mkRemote("Feedback")
-local RE_Status    = mkRemote("Status")
-local RE_ComboSync = mkRemote("ComboSync")
+local RE_Attack = createRemote("Attack")
+local RE_Feedback = createRemote("Feedback")
+local RE_ComboSync = createRemote("ComboSync")
 
-local CONFIG = {
-	HIT_RADIUS         = 11,
-	HIT_OFFSET         = 1.5,
-	COMBO_DAMAGE       = { 8, 10, 14, 22 },
-	ATTACK_COOLDOWN    = 0.28,
-	COMBO_RESET_TIME   = 2.0,
-	KNOCKBACK_FORCE    = 42,
-	KNOCKBACK_DURATION = 0.30,
-	STUN_DURATION      = 1.5,
-	DOT_THRESHOLD      = -0.5,
+local Config = {
+	HitboxSize = Vector3.new(7, 6, 7.5),
+	HitboxOffset = 4,
+	DotThreshold = 0.5,
+	ComboDamage = {10, 12, 16, 25},
+	KnockbackForce = {18, 22, 28, 55},
+	StunDuration = {0.2, 0.2, 0.3, 1.5},
+	AttackCooldown = 0.3,
+	ComboResetTime = 1.5,
+	MaxCombo = 4,
+	SlashColors = {
+		Color3.fromRGB(255, 255, 255),
+		Color3.fromRGB(255, 215, 0),
+		Color3.fromRGB(0, 191, 255),
+		Color3.fromRGB(255, 50, 50)
+	}
 }
 
-local dummyHpBar   = nil
-local dummyStunned = false
+local CombatHandler = {}
+CombatHandler.__index = CombatHandler
 
-local HP_NORMAL  = Color3.fromRGB(60, 200, 90)
-local HP_LOW     = Color3.fromRGB(220, 60, 60)
-local HP_STUNNED = Color3.fromRGB(160, 80, 220)
-
-local function getHpColor(ratio, stunned)
-	if stunned then return HP_STUNNED end
-	return Color3.new(
-		HP_LOW.R + (HP_NORMAL.R - HP_LOW.R) * ratio,
-		HP_LOW.G + (HP_NORMAL.G - HP_LOW.G) * ratio,
-		HP_LOW.B + (HP_NORMAL.B - HP_LOW.B) * ratio
-	)
+function CombatHandler.new(player)
+	local self = setmetatable({}, CombatHandler)
+	self.Player = player
+	self.Combo = 1
+	self.LastSwing = 0
+	self.OnCooldown = false
+	return self
 end
 
-local function spawnDummy(pos)
-	local model   = Instance.new("Model")
-	model.Name    = "Dummy"
-
-	local hum     = Instance.new("Humanoid")
-	hum.MaxHealth = 350
-	hum.Health    = 350
-	hum.Parent    = model
-
-	-- turn off the default roblox overhead bar, we have our own
-	hum.DisplayDistanceType = Enum.HumanoidDisplayDistanceType.None
-
-	local function part(name, size, color)
-		local p      = Instance.new("Part")
-		p.Name       = name
-		p.Size       = size
-		p.BrickColor = BrickColor.new(color)
-		p.Anchored   = false
-		p.CanCollide = true
-		p.Parent     = model
-		return p
-	end
-
-	local hrp   = part("HumanoidRootPart", Vector3.new(2, 2, 1),       "Medium stone grey")
-	local torso = part("Torso",            Vector3.new(2, 2, 1),       "Bright blue")
-	local head  = part("Head",             Vector3.new(1.2, 1.2, 1.2), "Pastel yellow")
-	local lArm  = part("Left Arm",         Vector3.new(1, 2, 1),       "Bright blue")
-	local rArm  = part("Right Arm",        Vector3.new(1, 2, 1),       "Bright blue")
-	local lLeg  = part("Left Leg",         Vector3.new(1, 2, 1),       "Reddish brown")
-	local rLeg  = part("Right Leg",        Vector3.new(1, 2, 1),       "Reddish brown")
-
-	model.PrimaryPart = hrp
-	hrp.CFrame        = CFrame.new(pos)
-
-	local offsets = {
-		[torso] = CFrame.new(0,    0,   0),
-		[head]  = CFrame.new(0,    1.6, 0),
-		[lArm]  = CFrame.new(-1.5, 0,   0),
-		[rArm]  = CFrame.new( 1.5, 0,   0),
-		[lLeg]  = CFrame.new(-0.5,-2,   0),
-		[rLeg]  = CFrame.new( 0.5,-2,   0),
-	}
-
-	for p, offset in pairs(offsets) do
-		p.CFrame = hrp.CFrame * offset
-		local w  = Instance.new("WeldConstraint")
-		w.Part0  = hrp
-		w.Part1  = p
-		w.Parent = model
-	end
-
-	-- health bar, AlwaysOnTop so it doesn't flicker when geometry is in the way
-	local bb       = Instance.new("BillboardGui")
-	bb.Size        = UDim2.new(0, 90, 0, 12)
-	bb.StudsOffset = Vector3.new(0, 4.2, 0)
-	bb.AlwaysOnTop = true
-	bb.Adornee     = hrp
-	bb.Parent      = hrp
-
-	local border            = Instance.new("Frame")
-	border.Size             = UDim2.new(1, 0, 1, 0)
-	border.BackgroundColor3 = Color3.fromRGB(15, 15, 15)
-	border.BorderSizePixel  = 0
-	border.Parent           = bb
-	Instance.new("UICorner", border).CornerRadius = UDim.new(0, 5)
-
-	local innerBg            = Instance.new("Frame")
-	innerBg.Size             = UDim2.new(1, -4, 1, -4)
-	innerBg.Position         = UDim2.new(0, 2, 0, 2)
-	innerBg.BackgroundColor3 = Color3.fromRGB(30, 30, 30)
-	innerBg.BorderSizePixel  = 0
-	innerBg.Parent           = border
-	Instance.new("UICorner", innerBg).CornerRadius = UDim.new(0, 4)
-
-	local hpFill            = Instance.new("Frame")
-	hpFill.Size             = UDim2.new(1, 0, 1, 0)
-	hpFill.BackgroundColor3 = HP_NORMAL
-	hpFill.BorderSizePixel  = 0
-	hpFill.Parent           = innerBg
-	Instance.new("UICorner", hpFill).CornerRadius = UDim.new(0, 4)
-
-	local hpText                  = Instance.new("TextLabel")
-	hpText.Size                   = UDim2.new(1, 0, 1, 0)
-	hpText.BackgroundTransparency = 1
-	hpText.TextColor3             = Color3.new(1, 1, 1)
-	hpText.TextScaled             = true
-	hpText.Font                   = Enum.Font.GothamBold
-	hpText.Text                   = tostring(hum.MaxHealth)
-	hpText.ZIndex                 = 3
-	hpText.Parent                 = hpFill
-
-	dummyHpBar = hpFill
-
-	local function refreshBar()
-		local ratio = math.clamp(hum.Health / hum.MaxHealth, 0, 1)
-		TweenS:Create(hpFill, TweenInfo.new(0.12), {
-			Size             = UDim2.new(ratio, 0, 1, 0),
-			BackgroundColor3 = getHpColor(ratio, dummyStunned),
-		}):Play()
-		hpText.Text = tostring(math.floor(hum.Health))
-	end
-
-	hum:GetPropertyChangedSignal("Health"):Connect(refreshBar)
-
-	hum.Died:Connect(function()
-		dummyHpBar   = nil
-		dummyStunned = false
-		task.wait(2)
-		model:Destroy()
-		spawnDummy(pos)
-	end)
-
-	model.Parent = workspace
+function CombatHandler:CanSwing()
+	local char = self.Player.Character
+	if not char then return false end
+	
+	local hum = char:FindFirstChildOfClass("Humanoid")
+	if not hum or hum.Health <= 0 then return false end
+	
+	if self.OnCooldown then return false end
+	if os.clock() - self.LastSwing < Config.AttackCooldown then return false end
+	
+	return true
 end
 
-spawnDummy(Vector3.new(0, 3, -12))
-
-local function knockback(fromChar, toChar)
-	local a = fromChar:FindFirstChild("HumanoidRootPart")
-	local b = toChar:FindFirstChild("HumanoidRootPart")
-	if not a or not b then return end
-
-	for _, p in ipairs(toChar:GetDescendants()) do
-		if p:IsA("BasePart") then p.Anchored = false end
-	end
-
-	-- strip out Y so it's a flat shove, not a launch
-	local flatDir = Vector3.new(b.Position.X - a.Position.X, 0, b.Position.Z - a.Position.Z)
-	if flatDir.Magnitude < 0.01 then flatDir = Vector3.new(0, 0, 1) end
-
-	local bv    = Instance.new("BodyVelocity")
-	bv.Velocity = flatDir.Unit * CONFIG.KNOCKBACK_FORCE
-	bv.MaxForce = Vector3.new(1e5, 1e5, 1e5)
-	bv.P        = 1e4
-	bv.Parent   = b
-
-	task.delay(CONFIG.KNOCKBACK_DURATION, function()
-		if bv and bv.Parent then bv:Destroy() end
-	end)
+local function spawnVFX(cf, step)
+	local vfx = Instance.new("Part")
+	vfx.Anchored = true
+	vfx.CanCollide = false
+	vfx.CastShadow = false
+	vfx.Material = Enum.Material.Neon
+	vfx.Color = Config.SlashColors[step]
+	vfx.Size = Vector3.new(0.1, 0.1, 0.1)
+	vfx.CFrame = cf * CFrame.Angles(0, 0, math.rad(math.random(-15, 15)))
+	vfx.Parent = workspace
+	
+	local targetSize = Vector3.new(Config.HitboxSize.X, 0.1, 2.5)
+	local tweenInfo = TweenInfo.new(0.2, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
+	
+	TweenService:Create(vfx, tweenInfo, {
+		Size = targetSize,
+		Transparency = 1,
+		CFrame = vfx.CFrame * CFrame.new(0, 0, -2)
+	}):Play()
+	
+	Debris:AddItem(vfx, 0.25)
 end
 
-local function stunDummy(toChar)
-	local hum = toChar:FindFirstChildOfClass("Humanoid")
-	if not hum then return end
+local function spawnHitParticles(pos, color)
+	local att = Instance.new("Attachment")
+	att.Position = pos
+	att.Parent = workspace.Terrain
+	
+	local particles = Instance.new("ParticleEmitter")
+	particles.Color = ColorSequence.new(color)
+	particles.Size = NumberSequence.new({
+		NumberSequenceKeypoint.new(0, 0.5),
+		NumberSequenceKeypoint.new(1, 0)
+	})
+	particles.Speed = NumberRange.new(10, 20)
+	particles.SpreadAngle = Vector2.new(180, 180)
+	particles.Lifetime = NumberRange.new(0.15, 0.3)
+	particles.Rate = 0
+	particles.Parent = att
+	
+	particles:Emit(10)
+	Debris:AddItem(att, 0.4)
+end
 
-	dummyStunned    = true
-	local origSpeed = hum.WalkSpeed
-	hum.WalkSpeed   = 0
+local function spawnDamageText(pos, dmg, isFinisher)
+	local gui = Instance.new("BillboardGui")
+	gui.Size = UDim2.fromOffset(80, 25)
+	gui.StudsOffsetWorldSpace = pos + Vector3.new(0, 2, 0)
+	gui.AlwaysOnTop = true
+	gui.Parent = workspace.Terrain
+	
+	local label = Instance.new("TextLabel")
+	label.Size = UDim2.fromScale(1, 1)
+	label.BackgroundTransparency = 1
+	label.Text = tostring(dmg)
+	label.TextColor3 = isFinisher and Color3.fromRGB(255, 50, 50) or Color3.fromRGB(255, 255, 255)
+	label.Font = Enum.Font.GothamBold
+	label.TextScaled = true
+	label.Parent = gui
+	
+	local drift = Vector3.new(math.random(-2, 2), 3, math.random(-2, 2))
+	local info = TweenInfo.new(0.5, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
+	
+	TweenService:Create(gui, info, {StudsOffsetWorldSpace = gui.StudsOffsetWorldSpace + drift}):Play()
+	TweenService:Create(label, info, {TextTransparency = 1}):Play()
+	
+	Debris:AddItem(gui, 0.55)
+end
 
-	if dummyHpBar then
-		local ratio = math.clamp(hum.Health / hum.MaxHealth, 0, 1)
-		TweenS:Create(dummyHpBar, TweenInfo.new(0.1), {
-			Size             = UDim2.new(ratio, 0, 1, 0),
-			BackgroundColor3 = HP_STUNNED,
-		}):Play()
+function CombatHandler:ApplyKnockback(targetRoot, dir, force)
+	for _, child in ipairs(targetRoot:GetChildren()) do
+		if child.Name == "CombatKB" or child.Name == "CombatAtt" then
+			child:Destroy()
+		end
 	end
+	
+	local att = Instance.new("Attachment")
+	att.Name = "CombatAtt"
+	att.Parent = targetRoot
+	
+	local lv = Instance.new("LinearVelocity")
+	lv.Name = "CombatKB"
+	lv.Attachment0 = att
+	lv.MaxForce = 150000
+	lv.VectorVelocity = (dir * force) + Vector3.new(0, force * 0.1, 0)
+	lv.Parent = targetRoot
+	
+	Debris:AddItem(lv, 0.2)
+	Debris:AddItem(att, 0.2)
+end
 
-	task.delay(CONFIG.STUN_DURATION, function()
-		dummyStunned  = false
-		hum.WalkSpeed = origSpeed
-		if dummyHpBar then
-			local ratio = math.clamp(hum.Health / hum.MaxHealth, 0, 1)
-			TweenS:Create(dummyHpBar, TweenInfo.new(0.2), {
-				BackgroundColor3 = getHpColor(ratio, false),
-			}):Play()
+function CombatHandler:ApplyStun(hum, duration)
+	local char = hum.Parent
+	if not char then return end
+	
+	char:SetAttribute("Stunned", true)
+	local originalSpeed = hum.WalkSpeed
+	hum.WalkSpeed = math.max(0, originalSpeed - 12)
+	
+	task.delay(duration, function()
+		if hum and hum.Parent then
+			hum.WalkSpeed = originalSpeed
+			char:SetAttribute("Stunned", nil)
 		end
 	end)
 end
 
-local function detectHits(char, dir)
-	local hrp = char:FindFirstChild("HumanoidRootPart")
-	if not hrp then return {} end
-
-	local mag = dir.Magnitude
-	if mag < 0.01 then return {} end
-	local unitDir = dir / mag
-
-	local origin  = hrp.Position + unitDir * CONFIG.HIT_OFFSET
-	local results = {}
-
-	for _, p in ipairs(Players:GetPlayers()) do
-		local c  = p.Character
-		if not c or c == char then continue end
-		local h  = c:FindFirstChild("HumanoidRootPart")
-		local hm = c:FindFirstChildOfClass("Humanoid")
-		if not h or not hm or hm.Health <= 0 then continue end
-		local delta = h.Position - origin
-		if delta.Magnitude <= CONFIG.HIT_RADIUS and delta.Unit:Dot(unitDir) > CONFIG.DOT_THRESHOLD then
-			table.insert(results, { char = c, hum = hm, isPlayer = true })
-		end
-	end
-
-	for _, obj in ipairs(workspace:GetChildren()) do
-		if not obj:IsA("Model") then continue end
-		if Players:GetPlayerFromCharacter(obj) then continue end
-		local h  = obj:FindFirstChild("HumanoidRootPart")
-		local hm = obj:FindFirstChildOfClass("Humanoid")
-		if not h or not hm or hm.Health <= 0 then continue end
-		local delta = h.Position - origin
-		if delta.Magnitude <= CONFIG.HIT_RADIUS and delta.Unit:Dot(unitDir) > CONFIG.DOT_THRESHOLD then
-			table.insert(results, { char = obj, hum = hm, isPlayer = false })
-		end
-	end
-
-	return results
-end
-
-local states = {}
-
-local function initState(p)
-	states[p] = {
-		step       = 1,
-		lastSwing  = 0,
-		swinging   = false,
-		onCooldown = false,
-	}
-end
-
--- runs every frame and resets a player's combo if they haven't swung in 2 seconds.
--- has to be a background loop because the old way (checking at the start of the next swing)
--- meant stopping mid-combo never reset anything until you swung again.
-RunSvc.Heartbeat:Connect(function()
-	local now = tick()
-	for player, s in pairs(states) do
-		if s.step > 1 and not s.onCooldown and (now - s.lastSwing) >= CONFIG.COMBO_RESET_TIME then
-			s.step = 1
-			RE_ComboSync:FireClient(player, 1, false)
-		end
-	end
-end)
-
-RE_Attack.OnServerEvent:Connect(function(player, swingDir)
-	if typeof(swingDir) ~= "Vector3" then return end
-	local mag = swingDir.Magnitude
-	if mag ~= mag or mag == math.huge or mag < 0.01 then return end
-
-	local s    = states[player]
-	local char = player.Character
-	if not s or not char then return end
-	if s.swinging or s.onCooldown then return end
-
-	local now = tick()
-	if now - s.lastSwing < CONFIG.ATTACK_COOLDOWN then return end
-
-	s.swinging  = true
-	s.lastSwing = now
-
-	local hits = detectHits(char, swingDir)
-
-	for _, v in ipairs(hits) do
-		local dmg = CONFIG.COMBO_DAMAGE[s.step] or CONFIG.COMBO_DAMAGE[#CONFIG.COMBO_DAMAGE]
-		v.hum:TakeDamage(dmg)
-		RE_Fb:FireClient(player, "HitConfirm", s.step)
-	end
-
-	-- 4th swing knocks back whatever it hits regardless of whether the first 3 landed
-	if s.step == 4 and #hits > 0 then
-		for _, v in ipairs(hits) do
-			knockback(char, v.char)
-			stunDummy(v.char)
-		end
-	end
-
-	if s.step >= 4 then
-		s.onCooldown = true
-		s.step       = 1
-		RE_ComboSync:FireClient(player, 1, true)
-		task.delay(2, function()
-			if states[player] then
-				states[player].onCooldown = false
-				RE_ComboSync:FireClient(player, 1, false)
+function CombatHandler:ScanHitbox(root)
+	local hitboxCF = root.CFrame * CFrame.new(0, 0, -Config.HitboxOffset)
+	local params = OverlapParams.new()
+	params.FilterType = Enum.RaycastFilterType.Exclude
+	params.FilterDescendantsInstances = {self.Player.Character}
+	params.MaxParts = 50
+	
+	local parts = workspace:GetPartBoundsInBox(hitboxCF, Config.HitboxSize, params)
+	local matched = {}
+	local targets = {}
+	
+	for _, part in ipairs(parts) do
+		local model = part:FindFirstAncestorOfClass("Model")
+		if model and not matched[model] then
+			matched[model] = true
+			
+			local hum = model:FindFirstChildOfClass("Humanoid")
+			local targetRoot = model:FindFirstChild("HumanoidRootPart")
+			
+			if hum and targetRoot and hum.Health > 0 then
+				local toTarget = (targetRoot.Position - root.Position).Unit
+				local facing = root.CFrame.LookVector
+				
+				if toTarget:Dot(facing) >= Config.DotThreshold then
+					table.insert(targets, model)
+				end
 			end
+		end
+	end
+	
+	return targets
+end
+
+function CombatHandler:Swing()
+	local char = self.Player.Character
+	if not char then return end
+	
+	local root = char:FindFirstChild("HumanoidRootPart")
+	if not root then return end
+	
+	local now = os.clock()
+	if now - self.LastSwing > Config.ComboResetTime then
+		self.Combo = 1
+	end
+	
+	self.LastSwing = now
+	local step = self.Combo
+	
+	if step >= Config.MaxCombo then
+		self.OnCooldown = true
+		self.Combo = 1
+		RE_ComboSync:FireClient(self.Player, 1, true)
+		task.delay(2, function()
+			self.OnCooldown = false
+			RE_ComboSync:FireClient(self.Player, 1, false)
 		end)
 	else
-		s.step += 1
-		RE_ComboSync:FireClient(player, s.step, false)
+		self.Combo = step + 1
+		RE_ComboSync:FireClient(self.Player, self.Combo, false)
 	end
-
-	task.defer(function()
-		if states[player] then states[player].swinging = false end
-	end)
-end)
-
-Players.PlayerAdded:Connect(function(p)
-	p.CharacterAdded:Connect(function()
-		task.wait()
-		initState(p)
-	end)
-end)
-
-for _, p in ipairs(Players:GetPlayers()) do
-	if p.Character then initState(p) end
+	
+	spawnVFX(root.CFrame * CFrame.new(0, 0, -Config.HitboxOffset + 1), step)
+	
+	local targets = self:ScanHitbox(root)
+	for _, target in ipairs(targets) do
+		local hum = target:FindFirstChildOfClass("Humanoid")
+		local targetRoot = target:FindFirstChild("HumanoidRootPart")
+		
+		if hum and targetRoot then
+			local dmg = Config.ComboDamage[step]
+			local force = Config.KnockbackForce[step]
+			local stun = Config.StunDuration[step]
+			
+			hum:TakeDamage(dmg)
+			RE_Feedback:FireClient(self.Player, "HitConfirm", step)
+			
+			spawnHitParticles(targetRoot.Position, Config.SlashColors[step])
+			spawnDamageText(targetRoot.Position, dmg, step == Config.MaxCombo)
+			
+			local kbDir = (targetRoot.Position - root.Position).Unit
+			if kbDir.Magnitude < 0.01 then kbDir = root.CFrame.LookVector end
+			
+			self:ApplyKnockback(targetRoot, kbDir, force)
+			self:ApplyStun(hum, stun)
+		end
+	end
 end
 
-Players.PlayerRemoving:Connect(function(p)
-	states[p] = nil
+local combatRegistry = {}
+
+local function registerPlayer(player)
+	combatRegistry[player] = CombatHandler.new(player)
+end
+
+local function removePlayer(player)
+	combatRegistry[player] = nil
+end
+
+local function spawnTrainingDummy(pos)
+	local dummy = Instance.new("Model")
+	dummy.Name = "Training Dummy"
+	
+	local hum = Instance.new("Humanoid")
+	hum.MaxHealth = 300
+	hum.Health = 300
+	hum.DisplayDistanceType = Enum.HumanoidDisplayDistanceType.None
+	hum.Parent = dummy
+	
+	local function createPart(name, size, color)
+		local part = Instance.new("Part")
+		part.Name = name
+		part.Size = size
+		part.Color = color
+		part.Material = Enum.Material.SmoothPlastic
+		part.Anchored = false
+		part.CanCollide = true
+		part.Parent = dummy
+		return part
+	end
+	
+	local hrp = createPart("HumanoidRootPart", Vector3.new(2, 2, 1), Color3.fromRGB(120, 120, 120))
+	local torso = createPart("Torso", Vector3.new(2, 2, 1), Color3.fromRGB(45, 120, 210))
+	local head = createPart("Head", Vector3.new(1.2, 1.2, 1.2), Color3.fromRGB(255, 220, 150))
+	local rArm = createPart("Right Arm", Vector3.new(1, 2, 1), Color3.fromRGB(45, 120, 210))
+	local lArm = createPart("Left Arm", Vector3.new(1, 2, 1), Color3.fromRGB(45, 120, 210))
+	local rLeg = createPart("Right Leg", Vector3.new(1, 2, 1), Color3.fromRGB(80, 80, 80))
+	local lLeg = createPart("Left Leg", Vector3.new(1, 2, 1), Color3.fromRGB(80, 80, 80))
+	
+	dummy.PrimaryPart = hrp
+	hrp.CFrame = CFrame.new(pos)
+	
+	local welds = {
+		[torso] = CFrame.new(0, 0, 0),
+		[head] = CFrame.new(0, 1.6, 0),
+		[rArm] = CFrame.new(1.5, 0, 0),
+		[lArm] = CFrame.new(-1.5, 0, 0),
+		[rLeg] = CFrame.new(0.5, -2, 0),
+		[lLeg] = CFrame.new(-0.5, -2, 0)
+	}
+	
+	for part, offset in pairs(welds) do
+		part.CFrame = hrp.CFrame * offset
+		local weld = Instance.new("WeldConstraint")
+		weld.Part0 = hrp
+		weld.Part1 = part
+		weld.Parent = dummy
+	end
+	
+	local ui = Instance.new("BillboardGui")
+	ui.Name = "StatusUI"
+	ui.Size = UDim2.fromOffset(100, 16)
+	ui.StudsOffset = Vector3.new(0, 3.5, 0)
+	ui.AlwaysOnTop = true
+	ui.Adornee = hrp
+	ui.Parent = hrp
+	
+	local bg = Instance.new("Frame")
+	bg.Size = UDim2.fromScale(1, 1)
+	bg.BackgroundColor3 = Color3.fromRGB(20, 20, 20)
+	bg.BorderSizePixel = 0
+	bg.Parent = ui
+	Instance.new("UICorner", bg).CornerRadius = UDim.new(0, 5)
+	
+	local barBg = Instance.new("Frame")
+	barBg.Size = UDim2.new(1, -4, 1, -4)
+	barBg.Position = UDim2.new(0, 2, 0, 2)
+	barBg.BackgroundColor3 = Color3.fromRGB(40, 40, 40)
+	barBg.BorderSizePixel = 0
+	barBg.Parent = bg
+	Instance.new("UICorner", barBg).CornerRadius = UDim.new(0, 4)
+	
+	local barFill = Instance.new("Frame")
+	barFill.Size = UDim2.fromScale(1, 1)
+	barFill.BackgroundColor3 = Color3.fromRGB(60, 200, 90)
+	barFill.BorderSizePixel = 0
+	barFill.Parent = barBg
+	Instance.new("UICorner", barFill).CornerRadius = UDim.new(0, 4)
+	
+	local text = Instance.new("TextLabel")
+	text.Size = UDim2.fromScale(1, 1)
+	text.BackgroundTransparency = 1
+	text.TextColor3 = Color3.fromRGB(255, 255, 255)
+	text.Font = Enum.Font.GothamBold
+	text.TextSize = 9
+	text.Text = "HP: 300/300"
+	text.Parent = barBg
+	
+	local function updateUI()
+		local ratio = math.clamp(hum.Health / hum.MaxHealth, 0, 1)
+		local stunned = dummy:GetAttribute("Stunned")
+		
+		local color = Color3.fromRGB(60, 200, 90)
+		if stunned then
+			color = Color3.fromRGB(160, 80, 220)
+		elseif ratio < 0.35 then
+			color = Color3.fromRGB(220, 60, 60)
+		elseif ratio < 0.65 then
+			color = Color3.fromRGB(240, 170, 40)
+		end
+		
+		TweenService:Create(barFill, TweenInfo.new(0.1), {
+			Size = UDim2.fromScale(ratio, 1),
+			BackgroundColor3 = color
+		}):Play()
+		
+		text.Text = stunned and "STUNNED" or string.format("HP: %d/%d", math.floor(hum.Health), hum.MaxHealth)
+	end
+	
+	hum:GetPropertyChangedSignal("Health"):Connect(updateUI)
+	dummy:GetAttributeChangedSignal("Stunned"):Connect(updateUI)
+	
+	hum.Died:Connect(function()
+		task.wait(2)
+		dummy:Destroy()
+		spawnTrainingDummy(pos)
+	end)
+	
+	dummy.Parent = workspace
+end
+
+RE_Attack.OnServerEvent:Connect(function(player, dir)
+	local handler = combatRegistry[player]
+	if handler and handler:CanSwing() then
+		handler:Swing()
+	end
 end)
+
+Players.PlayerAdded:Connect(registerPlayer)
+Players.PlayerRemoving:Connect(removePlayer)
+
+for _, p in ipairs(Players:GetPlayers()) do
+	registerPlayer(p)
+end
+
+spawnTrainingDummy(Vector3.new(0, 3, -15))
+spawnTrainingDummy(Vector3.new(8, 3, -13))
+spawnTrainingDummy(Vector3.new(-8, 3, -13))
