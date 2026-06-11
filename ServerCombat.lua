@@ -1,10 +1,8 @@
 -- Connected Discord-GitHub
--- Server-side combat validation, hit detection, stun, and knockback handling.
--- Credits: Discord Username (Caydeyeah) / Roblox Username (Caydeyeah)
+-- Server side combat handler. Runs hit detection, stun, and knockback.
+-- Credits: Caydeyeah (Discord/Roblox)
 --
--- This script acts as the main referee for the combat. The client just tells us when they want to swing,
--- but the server does all the actual hit checking, damage dealing, stun applying, and knockback calculating.
--- Doing this on the server makes it much harder for players to cheat.
+-- Server does all the work here so exploiters can't easily fake hits. Client just clicks.
 
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
@@ -12,13 +10,12 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local TweenService = game:GetService("TweenService")
 local Debris = game:GetService("Debris")
 
--- Create the remote folder. ReplicatedStorage is accessible to both server and client.
+-- remote events container setup
 local Remotes = Instance.new("Folder")
 Remotes.Name = "CombatRemotes"
 Remotes.Parent = ReplicatedStorage
 
--- Helper to set up our remote events. We configure properties first and parent last,
--- which is the recommended practice to avoid unnecessary replication updates.
+-- helper for remote initialization. properties first, parent last to optimize replication
 local function createRemote(name)
 	local remote = Instance.new("RemoteEvent")
 	remote.Name = name
@@ -30,29 +27,29 @@ local RE_Attack = createRemote("Attack")
 local RE_Feedback = createRemote("Feedback")
 local RE_ComboSync = createRemote("ComboSync")
 
--- Combat tuning config. Feel free to tweak these values to change how the game feels!
+-- change these values to tune the game balance
 local Config = {
-	HitboxSize = Vector3.new(7, 6, 7.5), -- Width, height, length of the swing area.
-	HitboxOffset = 4, -- How far in front of the player the hitbox is centered.
-	DotThreshold = 0.5, -- Determines how narrow the frontal cone is (0.5 means roughly 60 degrees).
-	ComboDamage = {10, 12, 16, 25}, -- Damage for hits 1, 2, 3, and the finisher.
-	KnockbackForce = {18, 22, 28, 55}, -- Knockback speed. Notice how the finisher has a massive kick.
-	StunDuration = {0.2, 0.2, 0.3, 1.5}, -- How long the target stays stun-locked.
-	AttackCooldown = 0.3, -- Safety delay between swings.
-	ComboResetTime = 1.5, -- If you wait longer than this, your combo resets to hit 1.
-	MaxCombo = 4, -- 4-hit combo chain.
+	HitboxSize = Vector3.new(7, 6, 7.5),
+	HitboxOffset = 4,
+	DotThreshold = 0.5, -- frontal cone limit (0.5 is around 60 deg)
+	ComboDamage = {10, 12, 16, 25},
+	KnockbackForce = {18, 22, 28, 55},
+	StunDuration = {0.2, 0.2, 0.3, 1.5},
+	AttackCooldown = 0.3,
+	ComboResetTime = 1.5,
+	MaxCombo = 4,
 	SlashColors = {
-		Color3.fromRGB(255, 255, 255), -- White
-		Color3.fromRGB(255, 215, 0),   -- Gold
-		Color3.fromRGB(0, 191, 255),   -- Sky Blue
-		Color3.fromRGB(255, 50, 50)    -- Crimson Red (Finisher)
+		Color3.fromRGB(255, 255, 255),
+		Color3.fromRGB(255, 215, 0),
+		Color3.fromRGB(0, 191, 255),
+		Color3.fromRGB(255, 50, 50)
 	}
 }
 
 local CombatHandler = {}
 CombatHandler.__index = CombatHandler
 
--- Constructor: Sets up the state for a new player.
+-- setup state for new players
 function CombatHandler.new(player)
 	local self = setmetatable({}, CombatHandler)
 	self.Player = player
@@ -62,7 +59,7 @@ function CombatHandler.new(player)
 	return self
 end
 
--- Checks if the player is actually allowed to attack right now.
+-- checks if player is alive and not spamming clicks too fast
 function CombatHandler:CanSwing()
 	local char = self.Player.Character
 	if not char then return false end
@@ -70,16 +67,13 @@ function CombatHandler:CanSwing()
 	local hum = char:FindFirstChildOfClass("Humanoid")
 	if not hum or hum.Health <= 0 then return false end
 	
-	-- If they're in the heavy cooldown after a full combo, block the swing.
 	if self.OnCooldown then return false end
-	
-	-- Prevent rapid-click macro spamming by enforcing the cooldown.
 	if os.clock() - self.LastSwing < Config.AttackCooldown then return false end
 	
 	return true
 end
 
--- Visual Effects: Spawns the neon slash indicators when you swing.
+-- spawns the slash neon part. random tilt makes it look less repetitive. tweens out.
 local function spawnVFX(cf, step)
 	local vfx = Instance.new("Part")
 	vfx.Anchored = true
@@ -88,12 +82,9 @@ local function spawnVFX(cf, step)
 	vfx.Material = Enum.Material.Neon
 	vfx.Color = Config.SlashColors[step]
 	vfx.Size = Vector3.new(0.1, 0.1, 0.1)
-	
-	-- Add a slight random tilt to the slash so every swing looks a little different.
 	vfx.CFrame = cf * CFrame.Angles(0, 0, math.rad(math.random(-15, 15)))
 	vfx.Parent = workspace
 	
-	-- We tween the neon part to look like a quick slash expanding and fading away.
 	local targetSize = Vector3.new(Config.HitboxSize.X, 0.1, 2.5)
 	local tweenInfo = TweenInfo.new(0.2, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
 	
@@ -106,7 +97,7 @@ local function spawnVFX(cf, step)
 	Debris:AddItem(vfx, 0.25)
 end
 
--- Spawns color-coded impact particles on the target when they get hit.
+-- satisfying impact particles on hit
 local function spawnHitParticles(pos, color)
 	local att = Instance.new("Attachment")
 	att.Position = pos
@@ -128,7 +119,7 @@ local function spawnHitParticles(pos, color)
 	Debris:AddItem(att, 0.4)
 end
 
--- Floating damage indicators. Makes combat feel way more arcade-like and satisfying.
+-- floaty arcade style damage numbers. Font is deprecated, using FontFace instead
 local function spawnDamageText(pos, dmg, isFinisher)
 	local gui = Instance.new("BillboardGui")
 	gui.Size = UDim2.fromOffset(80, 25)
@@ -141,12 +132,10 @@ local function spawnDamageText(pos, dmg, isFinisher)
 	label.BackgroundTransparency = 1
 	label.Text = tostring(dmg)
 	label.TextColor3 = isFinisher and Color3.fromRGB(255, 50, 50) or Color3.fromRGB(255, 255, 255)
-	-- BEST PRACTICE: Font is deprecated. We use FontFace with Font.fromEnum for clean modern formatting.
 	label.FontFace = Font.fromEnum(Enum.Font.GothamBold)
 	label.TextScaled = true
 	label.Parent = gui
 	
-	-- Drift the text upwards and to the side slightly, fading out at the same time.
 	local drift = Vector3.new(math.random(-2, 2), 3, math.random(-2, 2))
 	local info = TweenInfo.new(0.5, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
 	
@@ -156,10 +145,9 @@ local function spawnDamageText(pos, dmg, isFinisher)
 	Debris:AddItem(gui, 0.55)
 end
 
--- Applies a velocity push to the target root part.
--- Modern Roblox uses LinearVelocity rather than the deprecated BodyVelocity.
+-- flings target back. LinearVelocity is the modern successor to the deprecated BodyVelocity.
 function CombatHandler:ApplyKnockback(targetRoot, dir, force)
-	-- Clean up any lingering knockback objects so they don't stack up and fly the player into orbit.
+	-- clears old velocities so they don't stack up and fling them to space
 	for _, child in ipairs(targetRoot:GetChildren()) do
 		if child.Name == "CombatKB" or child.Name == "CombatAtt" then
 			child:Destroy()
@@ -173,8 +161,7 @@ function CombatHandler:ApplyKnockback(targetRoot, dir, force)
 	local lv = Instance.new("LinearVelocity")
 	lv.Name = "CombatKB"
 	lv.Attachment0 = att
-	lv.MaxForce = 150000 -- Big enough to push standard humanoids.
-	-- Add a slight upward angle to the knockback so the target gets lifted off the ground.
+	lv.MaxForce = 150000
 	lv.VectorVelocity = (dir * force) + Vector3.new(0, force * 0.1, 0)
 	lv.Parent = targetRoot
 	
@@ -182,16 +169,13 @@ function CombatHandler:ApplyKnockback(targetRoot, dir, force)
 	Debris:AddItem(att, 0.2)
 end
 
--- Applies a stun effect by slowing down the humanoid and setting a state flag.
--- Fixed a major bug here: previously, if you hit someone multiple times, their WalkSpeed
--- got permanently stuck at a slow speed because the second hit saved their *already slowed* speed
--- as their "original" walkspeed. Now we store the true speed in an attribute and don't overwrite it.
+-- stun code. slow them down on hit.
+-- fixed a common bug: saves original walkspeed on character attribute so multiple stun hits
+-- don't capture the slowed speed as original speed and break the character's speed forever.
 function CombatHandler:ApplyStun(hum, duration)
 	local char = hum.Parent
 	if not char then return end
 	
-	-- If they are already stunned, we want to reset/extend the stun.
-	-- We only capture the "OriginalWalkSpeed" if it hasn't been set yet.
 	local originalSpeed = char:GetAttribute("OriginalWalkSpeed")
 	if not originalSpeed then
 		originalSpeed = hum.WalkSpeed
@@ -199,11 +183,9 @@ function CombatHandler:ApplyStun(hum, duration)
 	end
 	
 	char:SetAttribute("Stunned", true)
-	-- Reduce their walkspeed, but make sure it doesn't go below 0.
 	hum.WalkSpeed = math.max(0, originalSpeed - 12)
 	
-	-- Use a timestamp token to verify that this specific stun instance is the most recent one.
-	-- If another hit occurs, the timestamp changes and the old stun cleanup is safely cancelled.
+	-- unique timestamp token validates that only the latest stun cleans up the speed override
 	local stunTime = os.clock()
 	char:SetAttribute("LastStunTime", stunTime)
 	
@@ -217,7 +199,7 @@ function CombatHandler:ApplyStun(hum, duration)
 	end)
 end
 
--- Checks for targets inside a box in front of the player.
+-- checks 3D space in front of the player using spatial query and dot product
 function CombatHandler:ScanHitbox(root)
 	local hitboxCF = root.CFrame * CFrame.new(0, 0, -Config.HitboxOffset)
 	local params = OverlapParams.new()
@@ -225,7 +207,6 @@ function CombatHandler:ScanHitbox(root)
 	params.FilterDescendantsInstances = {self.Player.Character}
 	params.MaxParts = 50
 	
-	-- Spatial query to grab all parts inside the hitbox region.
 	local parts = workspace:GetPartBoundsInBox(hitboxCF, Config.HitboxSize, params)
 	local matched = {}
 	local targets = {}
@@ -242,14 +223,12 @@ function CombatHandler:ScanHitbox(root)
 				local diff = targetRoot.Position - root.Position
 				local dist = diff.Magnitude
 				
-				-- Safe unit vector logic: if they are basically on top of each other,
-				-- we hit them directly without dividing by zero (which would produce NaN).
+				-- safe magnitude checks prevent division by zero / NaN vector errors
 				if dist > 0.01 then
 					local toTarget = diff / dist
 					local facing = root.CFrame.LookVector
 					
-					-- Dot product check: makes sure the target is actually in front of the player.
-					-- Prevents hitting people behind you.
+					-- dot product check keeps hit angle narrow so they can't hit backwards
 					if toTarget:Dot(facing) >= Config.DotThreshold then
 						table.insert(targets, model)
 					end
@@ -263,7 +242,7 @@ function CombatHandler:ScanHitbox(root)
 	return targets
 end
 
--- Core attack logic. Runs the combo updates, spawns the visuals, and applies damage.
+-- processes swing hit logic, deals damage, runs stun & knockbacks
 function CombatHandler:Swing()
 	local char = self.Player.Character
 	if not char then return end
@@ -271,7 +250,7 @@ function CombatHandler:Swing()
 	local root = char:FindFirstChild("HumanoidRootPart")
 	if not root then return end
 	
-	-- If you wait too long between clicks, your combo resets back to hit 1.
+	-- resets combo to hit 1 if they waited too long
 	local now = os.clock()
 	if now - self.LastSwing > Config.ComboResetTime then
 		self.Combo = 1
@@ -280,12 +259,10 @@ function CombatHandler:Swing()
 	self.LastSwing = now
 	local step = self.Combo
 	
-	-- Track the combo state and notify the client to sync their UI.
 	if step >= Config.MaxCombo then
 		self.OnCooldown = true
 		self.Combo = 1
 		RE_ComboSync:FireClient(self.Player, 1, true)
-		-- Locks the player out of attacking for 2 seconds after completing the finisher.
 		task.delay(2, function()
 			self.OnCooldown = false
 			RE_ComboSync:FireClient(self.Player, 1, false)
@@ -295,10 +272,8 @@ function CombatHandler:Swing()
 		RE_ComboSync:FireClient(self.Player, self.Combo, false)
 	end
 	
-	-- Visual swing trail.
 	spawnVFX(root.CFrame * CFrame.new(0, 0, -Config.HitboxOffset + 1), step)
 	
-	-- Detect and process hits.
 	local targets = self:ScanHitbox(root)
 	for _, target in ipairs(targets) do
 		local hum = target:FindFirstChildOfClass("Humanoid")
@@ -310,15 +285,11 @@ function CombatHandler:Swing()
 			local stun = Config.StunDuration[step]
 			
 			hum:TakeDamage(dmg)
-			
-			-- Tell the client they successfully hit someone so they can run hit-stop and camera shakes.
 			RE_Feedback:FireClient(self.Player, "HitConfirm", step)
 			
-			-- Visual feedback.
 			spawnHitParticles(targetRoot.Position, Config.SlashColors[step])
 			spawnDamageText(targetRoot.Position, dmg, step == Config.MaxCombo)
 			
-			-- Push the target away from us.
 			local kbDir = (targetRoot.Position - root.Position).Unit
 			if kbDir.Magnitude < 0.01 then kbDir = root.CFrame.LookVector end
 			
@@ -330,7 +301,7 @@ end
 
 local combatRegistry = {}
 
--- Safely register a player to the combat handler. Prevent double-registration.
+-- prevents double registration
 local function registerPlayer(player)
 	if not combatRegistry[player] then
 		combatRegistry[player] = CombatHandler.new(player)
@@ -341,7 +312,7 @@ local function removePlayer(player)
 	combatRegistry[player] = nil
 end
 
--- Programmatic Training Dummy builder for testing combat.
+-- builds a testing dummy programmatically
 local function spawnTrainingDummy(pos)
 	local dummy = Instance.new("Model")
 	dummy.Name = "Training Dummy"
@@ -364,7 +335,6 @@ local function spawnTrainingDummy(pos)
 		return part
 	end
 	
-	-- Build the body parts.
 	local hrp = createPart("HumanoidRootPart", Vector3.new(2, 2, 1), Color3.fromRGB(120, 120, 120))
 	local torso = createPart("Torso", Vector3.new(2, 2, 1), Color3.fromRGB(45, 120, 210))
 	local head = createPart("Head", Vector3.new(1.2, 1.2, 1.2), Color3.fromRGB(255, 220, 150))
@@ -376,7 +346,6 @@ local function spawnTrainingDummy(pos)
 	dummy.PrimaryPart = hrp
 	hrp.CFrame = CFrame.new(pos)
 	
-	-- Position parts relative to the root part.
 	local welds = {
 		[torso] = CFrame.new(0, 0, 0),
 		[head] = CFrame.new(0, 1.6, 0),
@@ -394,7 +363,7 @@ local function spawnTrainingDummy(pos)
 		weld.Parent = dummy
 	end
 	
-	-- Overhead Health Bar GUI.
+	-- overhead health bar HUD
 	local ui = Instance.new("BillboardGui")
 	ui.Name = "StatusUI"
 	ui.Size = UDim2.fromOffset(100, 16)
@@ -443,18 +412,18 @@ local function spawnTrainingDummy(pos)
 	text.Text = "HP: 300/300"
 	text.Parent = barBg
 	
-	-- Animates the health bar color transitions smoothly.
+	-- updates HP bar and turns purple when dummy is stunned
 	local function updateUI()
 		local ratio = math.clamp(hum.Health / hum.MaxHealth, 0, 1)
 		local stunned = dummy:GetAttribute("Stunned")
 		
-		local color = Color3.fromRGB(60, 200, 90) -- Green
+		local color = Color3.fromRGB(60, 200, 90)
 		if stunned then
-			color = Color3.fromRGB(160, 80, 220) -- Purple when stunned
+			color = Color3.fromRGB(160, 80, 220)
 		elseif ratio < 0.35 then
-			color = Color3.fromRGB(220, 60, 60) -- Red when low HP
+			color = Color3.fromRGB(220, 60, 60)
 		elseif ratio < 0.65 then
-			color = Color3.fromRGB(240, 170, 40) -- Orange when medium HP
+			color = Color3.fromRGB(240, 170, 40)
 		end
 		
 		TweenService:Create(barFill, TweenInfo.new(0.1), {
@@ -468,7 +437,7 @@ local function spawnTrainingDummy(pos)
 	hum:GetPropertyChangedSignal("Health"):Connect(updateUI)
 	dummy:GetAttributeChangedSignal("Stunned"):Connect(updateUI)
 	
-	-- Automatically respawn the dummy 2 seconds after it dies.
+	-- respawns dummy after 2 seconds
 	hum.Died:Connect(function()
 		task.wait(2)
 		dummy:Destroy()
@@ -478,10 +447,8 @@ local function spawnTrainingDummy(pos)
 	dummy.Parent = workspace
 end
 
--- Handle swing requests sent by client click events.
 RE_Attack.OnServerEvent:Connect(function(player, dir)
 	local handler = combatRegistry[player]
-	-- Security: validate timing and player states on the server to block rapid fires or stun exploits.
 	if handler and handler:CanSwing() then
 		handler:Swing()
 	end
@@ -490,12 +457,10 @@ end)
 Players.PlayerAdded:Connect(registerPlayer)
 Players.PlayerRemoving:Connect(removePlayer)
 
--- Catch any players that joined before the script started running.
 for _, p in ipairs(Players:GetPlayers()) do
 	registerPlayer(p)
 end
 
--- Populate the demo scene with a few dummies.
 spawnTrainingDummy(Vector3.new(0, 3, -15))
 spawnTrainingDummy(Vector3.new(8, 3, -13))
 spawnTrainingDummy(Vector3.new(-8, 3, -13))
