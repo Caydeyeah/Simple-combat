@@ -15,11 +15,11 @@ local Remotes = Instance.new("Folder")
 Remotes.Name = "CombatRemotes"
 Remotes.Parent = ReplicatedStorage
 
--- helper for remote initialization. properties first, parent last to optimize replication
+-- helper to setup network remotes
 local function createRemote(name)
 	local remote = Instance.new("RemoteEvent")
 	remote.Name = name
-	remote.Parent = Remotes
+	remote.Parent = Remotes -- parent last to prevent replication delay
 	return remote
 end
 
@@ -59,21 +59,21 @@ function CombatHandler.new(player)
 	return self
 end
 
--- checks if player is alive and not spamming clicks too fast
+-- checks if player is alive and can actually swing (not stun locked or on cooldown)
 function CombatHandler:CanSwing()
 	local char = self.Player.Character
 	if not char then return false end
 	
 	local hum = char:FindFirstChildOfClass("Humanoid")
-	if not hum or hum.Health <= 0 then return false end
+	if not hum or hum.Health <= 0 then return false end -- can't attack if dead
 	
 	if self.OnCooldown then return false end
-	if os.clock() - self.LastSwing < Config.AttackCooldown then return false end
+	if os.clock() - self.LastSwing < Config.AttackCooldown then return false end -- swing spam throttle
 	
 	return true
 end
 
--- spawns the slash neon part. random tilt makes it look less repetitive. tweens out.
+-- spawns basic neon slash parts
 local function spawnVFX(cf, step)
 	local vfx = Instance.new("Part")
 	vfx.Anchored = true
@@ -82,12 +82,14 @@ local function spawnVFX(cf, step)
 	vfx.Material = Enum.Material.Neon
 	vfx.Color = Config.SlashColors[step]
 	vfx.Size = Vector3.new(0.1, 0.1, 0.1)
+	-- random roll offset so swings look less copy-pasted
 	vfx.CFrame = cf * CFrame.Angles(0, 0, math.rad(math.random(-15, 15)))
 	vfx.Parent = workspace
 	
 	local targetSize = Vector3.new(Config.HitboxSize.X, 0.1, 2.5)
 	local tweenInfo = TweenInfo.new(0.2, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
 	
+	-- expand slash block forwards while fading it out
 	TweenService:Create(vfx, tweenInfo, {
 		Size = targetSize,
 		Transparency = 1,
@@ -119,7 +121,7 @@ local function spawnHitParticles(pos, color)
 	Debris:AddItem(att, 0.4)
 end
 
--- floaty arcade style damage numbers. Font is deprecated, using FontFace instead
+-- simple damage popups
 local function spawnDamageText(pos, dmg, isFinisher)
 	local gui = Instance.new("BillboardGui")
 	gui.Size = UDim2.fromOffset(80, 25)
@@ -136,6 +138,7 @@ local function spawnDamageText(pos, dmg, isFinisher)
 	label.TextScaled = true
 	label.Parent = gui
 	
+	-- drift numbers in a random arc so they don't stack directly on top of each other
 	local drift = Vector3.new(math.random(-2, 2), 3, math.random(-2, 2))
 	local info = TweenInfo.new(0.5, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
 	
@@ -145,9 +148,9 @@ local function spawnDamageText(pos, dmg, isFinisher)
 	Debris:AddItem(gui, 0.55)
 end
 
--- flings target back. LinearVelocity is the modern successor to the deprecated BodyVelocity.
+-- pushes target back using modern attachment physics (avoids deprecated BodyVelocity)
 function CombatHandler:ApplyKnockback(targetRoot, dir, force)
-	-- clears old velocities so they don't stack up and fling them to space
+	-- wipe old velocities so knockbacks don't stack and launch the dummy to space
 	for _, child in ipairs(targetRoot:GetChildren()) do
 		if child.Name == "CombatKB" or child.Name == "CombatAtt" then
 			child:Destroy()
@@ -161,8 +164,8 @@ function CombatHandler:ApplyKnockback(targetRoot, dir, force)
 	local lv = Instance.new("LinearVelocity")
 	lv.Name = "CombatKB"
 	lv.Attachment0 = att
-	lv.MaxForce = 150000
-	lv.VectorVelocity = (dir * force) + Vector3.new(0, force * 0.1, 0)
+	lv.MaxForce = 150000 -- high enough to override default character friction
+	lv.VectorVelocity = (dir * force) + Vector3.new(0, force * 0.1, 0) -- slight vertical lift
 	lv.Parent = targetRoot
 	
 	Debris:AddItem(lv, 0.2)
@@ -199,7 +202,7 @@ function CombatHandler:ApplyStun(hum, duration)
 	end)
 end
 
--- checks 3D space in front of the player using spatial query and dot product
+-- spatial box check in front of character (much more reliable than simple distance/raycasts)
 function CombatHandler:ScanHitbox(root)
 	local hitboxCF = root.CFrame * CFrame.new(0, 0, -Config.HitboxOffset)
 	local params = OverlapParams.new()
@@ -223,12 +226,12 @@ function CombatHandler:ScanHitbox(root)
 				local diff = targetRoot.Position - root.Position
 				local dist = diff.Magnitude
 				
-				-- safe magnitude checks prevent division by zero / NaN vector errors
+				-- prevent division by zero or NaN vectors on self-overlap check
 				if dist > 0.01 then
 					local toTarget = diff / dist
 					local facing = root.CFrame.LookVector
 					
-					-- dot product check keeps hit angle narrow so they can't hit backwards
+					-- dot product limits attack cone so you can't hit enemies standing behind you
 					if toTarget:Dot(facing) >= Config.DotThreshold then
 						table.insert(targets, model)
 					end
@@ -250,7 +253,7 @@ function CombatHandler:Swing()
 	local root = char:FindFirstChild("HumanoidRootPart")
 	if not root then return end
 	
-	-- resets combo to hit 1 if they waited too long
+	-- reset combo to swing 1 if player delayed too long
 	local now = os.clock()
 	if now - self.LastSwing > Config.ComboResetTime then
 		self.Combo = 1
@@ -259,6 +262,7 @@ function CombatHandler:Swing()
 	self.LastSwing = now
 	local step = self.Combo
 	
+	-- handle combo incrementing and final finisher cooldown lock
 	if step >= Config.MaxCombo then
 		self.OnCooldown = true
 		self.Combo = 1
